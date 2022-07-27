@@ -350,12 +350,12 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             g_temporal_K = torch.cat((gen_k, gen_k), dim=0) # generated k's
             g_temporal_IJ = torch.cat((imgs_i, imgs_j), dim=0) # real i & j
             
-            temporal_pred = temporal_discriminator(temporal_IJ, temporal_K)
-            neg_fake_t_loss = temporal_loss(temporal_pred, temporal_target)
+            g_temporal_pred = temporal_discriminator(g_temporal_IJ, g_temporal_K)
+            neg_fake_t_loss = temporal_loss(g_temporal_pred, g_temporal_target)
             
             # ----------------------------------   TOTAL GENERATOR LOSS (L_G)
-            
-            neg_d_fake_loss = adversarial_loss(discriminator(imgs_k, real_y).squeeze(), valid)
+                            
+            neg_d_fake_loss = adversarial_loss(discriminator(gen_imgs.detach(),gen_y).squeeze(), valid)
             
             #g_loss = Lz|c(x)-Lr(x)-L(x|x_i, x_j)
             g_loss = emb_loss + neg_d_fake_loss + neg_fake_t_loss
