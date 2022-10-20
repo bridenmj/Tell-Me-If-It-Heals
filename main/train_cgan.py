@@ -20,6 +20,10 @@ from torch.autograd import Variable
 import torch
 import torch.nn.functional as F
 
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
+
+
 
 
 import dcgan
@@ -43,7 +47,6 @@ parser.add_argument("--n_cpu", type=int, default=8, help="number of cpu threads 
 parser.add_argument("--latent_dim", type=int, default=100, help="dimensionality of the latent space") # original: 100, new: 16
 parser.add_argument("--img_size", type=int, default=256, help="size of each image dimension")  # changed from 64 to 128
 parser.add_argument('--n_classes', type=int, default=16, help='number of classes for dataset')
-#parser.add_argument('--n_classes', type=int, default=16, help='number of classes for dataset')
 parser.add_argument("--channels", type=int, default=3, help="number of image channels")
 parser.add_argument("--sample_interval", type=int, default=250, help="interval betwen image samples")
 opt = parser.parse_args()
@@ -51,12 +54,29 @@ opt = parser.parse_args()
 
 IMG_SHAPE = (opt.channels, opt.img_size, opt.img_size)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-CLIP = 0.25
-D_UPDATE_THRESHOLD = 8.0
+CLIP = 0.02
+D_UPDATE_THRESHOLD = 2.0
+
+
+
+def _extrapolate_linear(x1, x2, idx_i, idx_j, idx_k):
+    diff = x2-x1
+    dist = (idx_j-idx_i).unsqueeze(1)
+    proj_dist = idx_k-idx_i
+    unit_diff = diff/dist
+    proj_diff = unit_diff * proj_dist.unsqueeze(1)
+    x3 = x1 + proj_diff
+    # print(x1[0, :].to("cpu").numpy())
+    # print(x2[0, :].to("cpu").numpy())
+    # print(x3[0, :].to("cpu").numpy())
+    # print(dist, proj_dist)
+    # exit()
+    return x3
 
 
 def list_full_paths(directory, mode="train"):
-    res = []
+    return_imgs = []
+    return_idxs = []
 
     def pack_filename(idx, mice):
         original = "Day %d_%s.png"%(idx, mice)
@@ -109,10 +129,11 @@ def list_full_paths(directory, mode="train"):
                     grid3 = np.array(C)
 
                     grid_3d = np.meshgrid(grid1, grid2, grid3)
-                    combs = np.array(grid_3d).T.reshape(-1,3)
-                    res.extend(combs.tolist())
+                    combs = np.array(grid_3d).T.reshape(-1,3).tolist()
+                    return_imgs.extend(combs)
+                    for _ in range(len(combs)): return_idxs.append([i, j, k])
 
-    return res
+    return (return_imgs, return_idxs)
 
 
 
@@ -141,7 +162,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
 
     # retrieve the list of image paths
     #img_list = list_full_paths(datapath)
-    train_imgs = list_full_paths(datapath, "train")
+    train_imgs, train_indices = list_full_paths(datapath, "train")
     #val_imgs = list_full_paths(datapath, "val")
     #test_imgs = list_full_paths(datapath, "test")
 
@@ -158,7 +179,8 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
         # if it's 4 (stages), then it must be *cross entropy*
         embedding_loss = torch.nn.CrossEntropyLoss()
     
-    temporal_loss = torch.nn.BCELoss()
+    temporal_loss = torch.nn.BCELoss() #############################################################################
+    #temporal_loss = torch.nn.BCEWithLogitsLoss()
 
 
     # Initialize Generator and discriminator
@@ -168,11 +190,12 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
 
     # Initialize Temporal Encoder
     temporal_encoder = TE.Classifier_Encoder()
-    temporal_encoder.load_state_dict(torch.load("../checkpoints/normalized_classifier.tar"))
+    #temporal_encoder.load_state_dict(torch.load("../checkpoints/normalized_classifier.tar"))
     #temporal_encoder.load_from_state_dict("../checkpoints/normalized_classifier.tar")
-    for p in temporal_encoder.parameters():
-        p.require_grads = False
-    temporal_encoder.eval()
+    # for p in temporal_encoder.parameters():
+    #     p.require_grads = False
+    # temporal_encoder.eval()
+    temporal_encoder.train()
 
 
     # Initialize Temporal Discriminator
@@ -204,7 +227,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
     TRANSFORMS = T.Compose([T.ToTensor(), \
         T.Resize((opt.img_size, opt.img_size))]) # normalization afterwards
 
-    train_dataset = WoundImagePairsDataset(train_imgs, annotation_file, transform = TRANSFORMS)
+    train_dataset = WoundImagePairsDataset(train_imgs, train_indices, annotation_file, transform = TRANSFORMS)
     train_dataloader = DataLoader(train_dataset, batch_size=opt.batch_size, shuffle=True)
 
 
@@ -223,15 +246,41 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
 
 
     for epoch in range(opt.epochs):
+        for i, data in enumerate(train_dataloader):
+            
+            # PREPARE DATA
 
-        for i, (imgs_i, imgs_j, imgs_k, Y4, Y16) in enumerate(train_dataloader):
+            # unload data
+            imgs_i, imgs_j, imgs_k = data[0]
+            idx_i, idx_j, idx_k = data[1][:, 0].cuda(), data[1][:, 1].cuda(), data[1][:, 2].cuda()
+            Y4 = data[2]
+            #Y16 = data[3]
 
             # training parameters
             B = opt.batch_size
-
             # SKIP BATCH SIZE OF 1
             if imgs_k.shape[0] < B: continue
 
+
+            # Configure input
+            imgs_i = Variable(imgs_i.type(torch.FloatTensor).cuda())
+            imgs_j = Variable(imgs_j.type(torch.FloatTensor).cuda())
+            imgs_k = Variable(imgs_k.type(torch.FloatTensor).cuda())
+
+            # IMPORTANT: for Discriminators, *standardize* every image so far, both real and generated
+            standardize = T.Normalize(MEAN, STD)
+            imgs_i      =   standardize(imgs_i)
+            imgs_j      =   standardize(imgs_j)
+            imgs_k      =   standardize(imgs_k)
+
+
+            # unfreeze temporal encoder and perform extrapolation on the go
+            embeds_i = temporal_encoder(transform_densenet(imgs_i))[1]      # [1] because we only need the embedding from returned (u1, embeddings), where u1 is the class prediction
+            embeds_j = temporal_encoder(transform_densenet(imgs_j))[1]
+            extp_embeds_k = _extrapolate_linear(embeds_i, embeds_j, idx_i, idx_j, idx_k)
+            Y16 = extp_embeds_k
+
+            
             # Sample labels as generator input
             if C == 4:
                 real_y = Y4.cuda()
@@ -251,35 +300,32 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             valid = Variable(torch.ones(B).cuda(), requires_grad=False)
             fake = Variable(torch.zeros(B).cuda(), requires_grad=False)
 
-            # Configure input
-            imgs_k = Variable(imgs_k.type(torch.FloatTensor).cuda())
-            imgs_i = Variable(imgs_i.type(torch.FloatTensor).cuda())
-            imgs_j = Variable(imgs_j.type(torch.FloatTensor).cuda())
 
-            # ---------------------
-            #  Train Discriminator
-            # ---------------------
-            
+            # INITIATE TRAINING
+
+            # =====================================================================================================================
+            # Prerequisite: Generate a Batch of Images
+            # =====================================================================================================================
+
             # Generate a batch of images
             gen_imgs = generator(noise, gen_y).view(B, *IMG_SHAPE)
 
-
             # IMPORTANT: for Discriminators, *standardize* every image so far, both real and generated
-            standardize = T.Normalize(MEAN, STD)
-            imgs_i      =   standardize(imgs_i)
-            imgs_j      =   standardize(imgs_j)
-            imgs_k      =   standardize(imgs_k)
-            gen_imgs    =   standardize(gen_imgs)
-            
+            gen_imgs = standardize(gen_imgs)
+
+
+            # =====================================================================================================================
+            #  Train Discriminator (gen_imgs need to be detached)
+            # =====================================================================================================================
 
             optimizer_D.zero_grad()
 
             # ----------------------------------   REALISM LOSS (Loss R)
 
             # Loss for real images
-            d_real_loss = adversarial_loss(discriminator(imgs_k, real_y).squeeze(), valid)
+            d_real_loss = adversarial_loss(discriminator(imgs_k, gen_y.detach()).squeeze(), valid) #############################################################################
             # Loss for fake images
-            d_fake_loss = adversarial_loss(discriminator(gen_imgs.detach(),gen_y).squeeze(), fake)
+            d_fake_loss = adversarial_loss(discriminator(gen_imgs.detach(), gen_y.detach()).squeeze(), fake)
             
             
             # ----------------------------------   TEMPORAL COHERENCE LOSS (Loss Xpred_k | Xi, Xj)
@@ -289,6 +335,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             Yjfk = torch.zeros((B,1)) # j and fake k
 
             gen_k = gen_imgs.detach()
+
             """discriminator sees real and fake pairs, generator needs to see the the fake pairs w/ i & j with 'valid' """
             temporal_target = torch.cat((Yirk, Yjrk, Yifk, Yjfk), dim=0).cuda()
             temporal_K = torch.cat((imgs_k, imgs_k, gen_k, gen_k), dim=0)
@@ -296,30 +343,39 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
 
             temporal_pred = temporal_discriminator(temporal_IJ, temporal_K)
             """ neg of This loss should be added to gen. discriminator sees real and fake pairs"""
+            # if epoch > 4:
+            #     print(temporal_pred)
+            #     print(temporal_target)
+            #     exit()
             t_loss = temporal_loss(temporal_pred, temporal_target)
 
             
             # ----------------------------------   TOTAL DISCRIMINATOR LOSS (L_D)
-
-            #d_loss = (d_real_loss + d_fake_loss + emb_loss)  # 2 LOSSES ONLY
             
             #g_loss = Lz|c(x)+L(x|x_i, x_j)
+            # if epoch > 10 and (d_real_loss < 0.1 or d_fake_loss > 1.0):
+            #     d_loss = t_loss
+            # else:
+            #     
             d_loss = (d_real_loss + d_fake_loss + t_loss) # ALL 3 LOSSES
-                
+            #d_loss = d_real_loss + d_fake_loss           # ONLY VANILLA GAN LOSS
+
             # Finalizing: conditional update D
-            #if d_loss >= D_UPDATE_THRESHOLD:
-            #if g_loss <= D_UPDATE_THRESHOLD:   # TEST
+            # if g_loss <= D_UPDATE_THRESHOLD:   # TEST
             d_loss.backward()
-            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), CLIP) # notice the trailing _ representing in-place
+            #torch.nn.utils.clip_grad_norm_(discriminator.parameters(), CLIP) # notice the trailing _ representing in-place
             optimizer_D.step()
 
-            # -----------------
-            #  Train Generator
-            # -----------------
+
+
+            # =====================================================================================================================
+            #  Train Generator (DO NOT detach gen_imgs)
+            # =====================================================================================================================
             
             # ----------------------------------   EMBEDDING LOSS (Loss yhat|z or c|z)
 
-            cls_input = gen_imgs.detach()
+            #cls_input = gen_imgs.detach()
+            cls_input = gen_imgs
             cls_input = transform_densenet(cls_input)
 
             target = gen_y
@@ -341,10 +397,11 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             
             # I Don't think you neg_d_real_loss, I think this would just act as a regularizing term
             neg_d_real_loss = adversarial_loss(real, fake)
-            neg_d_fake_loss = adversarial_loss(discriminator(gen_imgs.detach(),gen_y).squeeze(), real) #already
+            neg_d_fake_loss = adversarial_loss(discriminator(gen_imgs, gen_y).squeeze(), real) #already
             g_loss = emb_loss + neg_d_real_loss + neg_d_fake_loss
             """
             # ----------------------------------   FAKE TEMPORAL COHERENCE LOSS (Loss Xpred_k | Xi, Xj)
+            gen_k = gen_imgs
             
             g_temporal_target = torch.cat((Yirk, Yjrk), dim=0).cuda() # Real temporal targets
             g_temporal_K = torch.cat((gen_k, gen_k), dim=0) # generated k's
@@ -352,21 +409,35 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             
             g_temporal_pred = temporal_discriminator(g_temporal_IJ, g_temporal_K)
             neg_fake_t_loss = temporal_loss(g_temporal_pred, g_temporal_target)
-            
+
             # ----------------------------------   TOTAL GENERATOR LOSS (L_G)
                             
-            neg_d_fake_loss = adversarial_loss(discriminator(gen_imgs.detach(),gen_y).squeeze(), valid)
+            neg_d_fake_loss = adversarial_loss(discriminator(gen_imgs, gen_y).squeeze(), valid)
             
             #g_loss = Lz|c(x)-Lr(x)-L(x|x_i, x_j)
-            g_loss = emb_loss + neg_d_fake_loss + neg_fake_t_loss
-
+            # if epoch > 10 and neg_d_fake_loss < 0.1:
+            #     g_loss = emb_loss + neg_fake_t_loss
+            # else:
+            g_loss = neg_d_fake_loss + emb_loss + neg_fake_t_loss
+            #g_loss = emb_loss
+            
             g_loss.backward()
-            torch.nn.utils.clip_grad_norm_(generator.parameters(), CLIP) # notice the trailing _ representing in-place
+            #torch.nn.utils.clip_grad_norm_(generator.parameters(), CLIP) # notice the trailing _ representing in-place
             optimizer_G.step()
             
             # print results
             print ("[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f]" % (epoch, opt.epochs, i, len(train_dataloader),
-                                                                d_loss.data.cpu(), g_loss.data.cpu()))
+                                                                d_loss.data.cpu(), g_loss.data.cpu()),
+                                                                end='\r'
+                    )
+            # print("emb", emb_loss.item())
+            # print("-fake_temporal", neg_fake_t_loss.item())
+            # print("(end)")
+
+
+            # =====================================================================================================================
+            # Per Iteration Wrap-up: Present Generated Images and Save Checkpoint
+            # =====================================================================================================================
 
             batches_done = epoch * len(train_dataloader) + i
             if batches_done % opt.sample_interval == 0:
@@ -378,12 +449,21 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
                 save_image(gen_imgs.data, os.path.join(outpath, '%d-%d.png' % (epoch,batches_done)), nrow=8, normalize=False) # nrow = number of img per row, original C, current C//4
                 #save_image(imgs_k.data, os.path.join(outpath, '%d-%d.png' % (epoch,batches_done)), nrow=C//2, normalize=False) # real data
 
-        if (epoch+1) % 10 == 0:
+                step = batches_done // opt.sample_interval
+                writer.add_scalar("d_real_loss", d_real_loss, step)
+                writer.add_scalar("d_fake_loss", d_fake_loss, step)
+                writer.add_scalar("neg_d_fake_loss", neg_d_fake_loss, step)
+                print(d_real_loss.item(), d_fake_loss.item(), t_loss.item(), neg_d_fake_loss.item(), emb_loss.item(), neg_fake_t_loss.item())
+
+        if (epoch+1) % 1 == 0:
+            # print(g_temporal_target)
             torch.save(generator, os.path.join(outpath, "cgan_gen.pth"))
 
+    # print(temporal_pred)
+    # print(temporal_target)
 
     #return {"model":[generator, discriminator], "dataloaders":[train_dataloader, val_dataloader, test_dataloader]}
-
+    
 
 
 
@@ -404,3 +484,5 @@ if __name__ == "__main__":
 
     # train/test the models
     train_cgan(datapath, annotation_file)
+
+    writer.flush()

@@ -14,8 +14,9 @@ from torchvision.io import read_image
 
 
 class WoundImagePairsDataset(Dataset):
-    def __init__(self, combs, annotations_file, transform=None, target_transform=None):
+    def __init__(self, combs, comb_idx, annotations_file, transform=None, target_transform=None):
         self.img_list = combs
+        self.idx_list = comb_idx
         self.img_labels = pd.read_csv(annotations_file)
 
         self.transform = transform 
@@ -55,5 +56,7 @@ class WoundImagePairsDataset(Dataset):
         label = torch.FloatTensor(label)
         embed = torch.FloatTensor(embed)
 
-        return (image_i, image_j, image_k, label, embed)
+        indices = self.idx_list[idx]
+
+        return ((image_i, image_j, image_k), torch.tensor(indices), label, embed)
     

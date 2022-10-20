@@ -1,0 +1,7 @@
+tmp
+test_results
+data_augmented
+checkpoints
+main/runs
+
+.vscode

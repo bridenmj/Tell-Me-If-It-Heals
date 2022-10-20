@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+
 class Encoder(nn.Module):
     """
     Encoder model Pytorch. 
@@ -15,7 +16,7 @@ class Encoder(nn.Module):
         # Initialize self._modules as OrderedDict
         super(Encoder, self).__init__() 
         # Initialize densenet121
-        self.embed_model = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=False)
+        self.embed_model = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
         # Remove Classifying layer
         self.embed_model = nn.Sequential(*list(self.embed_model.children())[:-1])
         # 7x7 average pool layer
@@ -96,10 +97,17 @@ class Classifier_Encoder(nn.Module):
         #self.embed_model = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=False)
         #self.embed_model = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
 
-        healnet = HealNet()
-        path_to_healnet = "../checkpoints/normalized_healnet_10epoch.tar" # Path to healnet weights
-        healnet.load_state_dict(torch.load(path_to_healnet))
-        self.embed_model = healnet.encoder
+        # healnet = HealNet()
+        # path_to_healnet = "../checkpoints/normalized_healnet_10epoch.tar" # Path to healnet weights
+        # healnet.load_state_dict(torch.load(path_to_healnet))
+        # for param in healnet.parameters():
+        #     param.requires_grad = False
+        # healnet.fc_16
+        # self.embed_model = healnet.encoder
+        self.embed_model = Encoder()
+        for params in self.embed_model.parameters():
+            params.requires_grad = False
+        self.embed_model.fc_16.requires_grad_(True) #######################################
 
         self.dense = nn.Linear(16, 8)
         self.classifier= nn.Linear(8, num_classes)
@@ -111,6 +119,8 @@ class Classifier_Encoder(nn.Module):
     def forward(self, x):
         u1 = self.embed_model(x)
         embeddings = u1
+        #return embeddings
+
         # u1 = torch.relu(self.dense(u1))
         # u1 = self.classifier(u1)
         u1 = self.direct_classifier(u1)
