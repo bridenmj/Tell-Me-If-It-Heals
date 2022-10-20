@@ -5,3 +5,5 @@ checkpoints
 main/runs
 
 .vscode
+
+__pycache__
