@@ -1,1 +1,1 @@
-python3 train_cgan.py --img_size 128 --batch_size 8 --lr 0.0001 --epoch 5 --sample_interval 250
+python3 train_cgan.py --img_size 128 --batch_size 8 --lr 1e-4 --epoch 80 --sample_interval 250 --b1 0.5 --b2 0.99 --n_classes 16

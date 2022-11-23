@@ -7,3 +7,8 @@ main/runs
 .vscode
 
 __pycache__
+
+
+runs
+
+main/play.py

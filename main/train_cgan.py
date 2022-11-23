@@ -55,22 +55,25 @@ opt = parser.parse_args()
 IMG_SHAPE = (opt.channels, opt.img_size, opt.img_size)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CLIP = 0.02
-D_UPDATE_THRESHOLD = 2.0
+D_UPDATE_THRESHOLD = 0.25
+
 
 
 
 def _extrapolate_linear(x1, x2, idx_i, idx_j, idx_k):
     diff = x2-x1
-    dist = (idx_j-idx_i).unsqueeze(1)
+    dist = idx_j-idx_i
     proj_dist = idx_k-idx_i
-    unit_diff = diff/dist
-    proj_diff = unit_diff * proj_dist.unsqueeze(1)
+    unit_diff = diff / dist
+    proj_diff = unit_diff * proj_dist
     x3 = x1 + proj_diff
-    # print(x1[0, :].to("cpu").numpy())
-    # print(x2[0, :].to("cpu").numpy())
-    # print(x3[0, :].to("cpu").numpy())
-    # print(dist, proj_dist)
-    # exit()
+    #assert(x3.shape == x1.shape)
+    # print(idx_i.shape, idx_j.shape, idx_k.shape)
+    # print(x3.shape, x1.shape, x3.dim())
+    assert(x3.dim() == x1.dim() and x3.shape[1] == x1.shape[1])
+    #print(x1[0, :5], x2[0, :5], x3[0, :5])
+    #print(idx_i[0], idx_j[0], idx_k[0])
+    assert(idx_i[0] < idx_j[0] and idx_j[0] < idx_k[0])
     return x3
 
 
@@ -149,7 +152,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
     # These will help you very much
 
     C = opt.n_classes
-    if C not in [4, 16]: raise NotImplementedError("Check n_classes in arguments")
+    #if C not in [4, 16]: raise NotImplementedError("Check n_classes in arguments")
     
     # normalization parameters of Circular Cropped Wound Dataset
     MEAN = torch.tensor([0.56014212, 0.40342121, 0.32133712])
@@ -171,7 +174,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
     adversarial_loss = torch.nn.BCELoss()
     #adversarial_loss = torch.nn.MSELoss() # an alternative loss function
     
-    if C == 16:
+    if C != 4:
         # if it's 16, they are not binary values and should be treated as random numbers
         embedding_loss = torch.nn.MSELoss() # embedding loss with MSE
         #embedding_loss = torch.nn.CosineEmbeddingLoss() # embedding loss with CEL https://pytorch.org/docs/stable/generated/torch.nn.CosineEmbeddingLoss.html
@@ -192,8 +195,8 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
     temporal_encoder = TE.Classifier_Encoder()
     #temporal_encoder.load_state_dict(torch.load("../checkpoints/normalized_classifier.tar"))
     #temporal_encoder.load_from_state_dict("../checkpoints/normalized_classifier.tar")
-    # for p in temporal_encoder.parameters():
-    #     p.require_grads = False
+    for p in temporal_encoder.parameters():
+       p.require_grads = False
     # temporal_encoder.eval()
     temporal_encoder.train()
 
@@ -232,9 +235,14 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
 
 
     # Optimizers
-    optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
-    optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
-
+    b1_G = 0.5 #0.4
+    b2_G = 0.99
+    b1_D = 0.5 #0.5
+    b2_D = 0.99 #0.95
+    optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(b1_G, b2_G))
+    optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(b1_D, b2_D))
+    # optimizer_G = torch.optim.RMSprop(generator.parameters(), lr=opt.lr)
+    # optimizer_D = torch.optim.RMSprop(discriminator.parameters(), lr=opt.lr)
 
     # densenet image preparation
     DENSENET_IMAGE_SHAPE = 244
@@ -254,7 +262,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             imgs_i, imgs_j, imgs_k = data[0]
             idx_i, idx_j, idx_k = data[1][:, 0].cuda(), data[1][:, 1].cuda(), data[1][:, 2].cuda()
             Y4 = data[2]
-            #Y16 = data[3]
+            
 
             # training parameters
             B = opt.batch_size
@@ -277,8 +285,10 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             # unfreeze temporal encoder and perform extrapolation on the go
             embeds_i = temporal_encoder(transform_densenet(imgs_i))[1]      # [1] because we only need the embedding from returned (u1, embeddings), where u1 is the class prediction
             embeds_j = temporal_encoder(transform_densenet(imgs_j))[1]
-            extp_embeds_k = _extrapolate_linear(embeds_i, embeds_j, idx_i, idx_j, idx_k)
+            extp_embeds_k = _extrapolate_linear(embeds_i, embeds_j, idx_i.unsqueeze(1), idx_j.unsqueeze(1), idx_k.unsqueeze(1))
+            
             Y16 = extp_embeds_k
+            #Y16 = temporal_encoder(transform_densenet(imgs_k))[1]
 
             
             # Sample labels as generator input
@@ -288,7 +298,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
                 #gen_y = synth_onehot(n_classes=C, batch_size=B, sorted=False).to("cuda")
                 y_disp = synth_onehot(n_classes=C, batch_size=B, sorted=True).to("cuda") # labels for display
             
-            elif C == 16:
+            else:
                 real_y = Y16.cuda()
                 gen_y = Y16.cuda()
                 y_disp = Y16.cuda() # labels for display
@@ -361,8 +371,8 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             #d_loss = d_real_loss + d_fake_loss           # ONLY VANILLA GAN LOSS
 
             # Finalizing: conditional update D
-            # if g_loss <= D_UPDATE_THRESHOLD:   # TEST
-            d_loss.backward()
+            if d_real_loss+d_fake_loss > D_UPDATE_THRESHOLD:   # TEST
+                d_loss.backward()
             #torch.nn.utils.clip_grad_norm_(discriminator.parameters(), CLIP) # notice the trailing _ representing in-place
             optimizer_D.step()
 
@@ -419,7 +429,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             #     g_loss = emb_loss + neg_fake_t_loss
             # else:
             g_loss = neg_d_fake_loss + emb_loss + neg_fake_t_loss
-            #g_loss = emb_loss
+            #g_loss = neg_d_fake_loss + emb_loss
             
             g_loss.backward()
             #torch.nn.utils.clip_grad_norm_(generator.parameters(), CLIP) # notice the trailing _ representing in-place

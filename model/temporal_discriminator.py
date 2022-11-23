@@ -76,8 +76,8 @@ class Classifier(nn.Module):
 
     def forward(self, u, v):
         z = torch.cat((u, v), dim=1)
-        #z = self.fc1_bn(self.fc1(z))
-        z = self.fc1(z)
+        z = self.fc1_bn(self.fc1(z))
+        #z = self.fc1(z)
         #z = F.tanh(z)
         z = F.leaky_relu(z, 0.2)
         #print(z)

@@ -62,7 +62,6 @@ class HealNet(nn.Module):
         # Initialize densenet121
         self.encoder.load_embed_wts(device)
 
-
     def forward(self, x):
         """
         forward call to Healnet
@@ -72,14 +71,10 @@ class HealNet(nn.Module):
         Return:
             preds: logits for BCE.
         """
-
         # Embed Left
         u1 = self.encoder(x[:,0,:,:,:])
-
-
         # Embed Reft
         u2 = self.encoder(x[:,1,:,:,:])
-
         #Return logits
         return self.fc_classify(torch.cat((u1,u2),1))
 
@@ -93,28 +88,19 @@ class Classifier_Encoder(nn.Module):
         num_classes = 4
         # Initialize self._modules as OrderedDict
         super(Classifier_Encoder, self).__init__() 
-        # Initialize densenet121
-        #self.embed_model = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=False)
-        #self.embed_model = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
-
-        # healnet = HealNet()
-        # path_to_healnet = "../checkpoints/normalized_healnet_10epoch.tar" # Path to healnet weights
-        # healnet.load_state_dict(torch.load(path_to_healnet))
-        # for param in healnet.parameters():
-        #     param.requires_grad = False
-        # healnet.fc_16
-        # self.embed_model = healnet.encoder
         self.embed_model = Encoder()
+        self.embed_model.load_state_dict(torch.load("../checkpoints/healnet_pretext_encoder_50epoch_149_128.tar"))
+
         for params in self.embed_model.parameters():
             params.requires_grad = False
-        self.embed_model.fc_16.requires_grad_(True) #######################################
+        #self.embed_model.fc_16.requires_grad_(True) #######################################
 
         self.dense = nn.Linear(16, 8)
         self.classifier= nn.Linear(8, num_classes)
         # adding an alternative layer for AB test
-        self.direct_classifier = nn.Linear(16, num_classes)
+        #self.direct_classifier = nn.Linear(16, num_classes)
 
-        self.softmax = nn.Softmax(dim=-1)
+        #self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x):
         u1 = self.embed_model(x)
@@ -123,8 +109,8 @@ class Classifier_Encoder(nn.Module):
 
         # u1 = torch.relu(self.dense(u1))
         # u1 = self.classifier(u1)
-        u1 = self.direct_classifier(u1)
-        u1 = self.softmax(u1)
+        #u1 = self.direct_classifier(u1)
+        #u1 = self.softmax(u1)
         return u1, embeddings
 
     # def load_weights(self, weight_dict):

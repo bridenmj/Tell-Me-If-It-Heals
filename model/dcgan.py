@@ -19,6 +19,8 @@ import torch
 
 # https://arxiv.org/pdf/2104.00567.pdf
 
+# https://www.reddit.com/r/MachineLearning/comments/8ivh3o/d_advice_for_gan_optimization/
+
 CUDA = True if torch.cuda.is_available() else False
 
 # some parameters
@@ -34,49 +36,44 @@ class Generator(nn.Module):
         self.n_classes = n_classes
 
         self.fc1_1 = nn.Linear(self.latent_dim, 256)
-        self.fc1_1_bn = nn.BatchNorm1d(256, 0.8) # test w/o batchnorm
         self.fc1_2 = nn.Linear(self.n_classes, 256) 
-        self.fc1_2_bn = nn.BatchNorm1d(256, 0.8) # test w/o batchnorm
-        
-        #self.fc2 = nn.Linear(512, 1024)
-        #self.fc2_bn = nn.BatchNorm1d(1024, 0.8)
-        #self.fc3 = nn.Linear(1024, 2048)
-        #self.fc3_bn = nn.BatchNorm1d(2048, 0.8)
-        #self.fc4 = nn.Linear(2048, int(np.prod(self.img_shape)))
 
         # changes to 2d
-        nz = int(64 * img_shape[1]//2//2 *img_shape[2]//2//2)
+        nz = int(64 * img_shape[1]//8 *img_shape[2]//8)
         self.fc = nn.Linear(512, nz)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.deconv1 = nn.ConvTranspose2d(64, 32, 4, 2, 1)
-        self.bn2 = nn.BatchNorm2d(32)
-        self.deconv2 = nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1)
+        
+        self.deconv1 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+        
+        self.deconv2 = nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1)
+        self.bn2 = nn.BatchNorm2d(16)
+
+        self.deconv3 = nn.ConvTranspose2d(16, 3, kernel_size=4, stride=2, padding=1)
 
 
 
 
     # forward method
     def forward(self, z, label):
-        #x = F.relu(self.fc1_1_bn(self.fc1_1(z))) # w/ batchnorm
-        #y = F.relu(self.fc1_2_bn(self.fc1_2(label))) # w/ batchnorm
-        x = F.leaky_relu(self.fc1_1(z), 0.2) # test: w/o batchnorm, leaky
-        y = F.leaky_relu(self.fc1_2(label), 0.2) # test: w/o batchnorm, leaky
+        x = F.leaky_relu(self.fc1_1(z), 0.2) # test: w/o batchnorm
+        y = F.leaky_relu(self.fc1_2(label), 0.2) # test: w/o batchnorm
         x = torch.cat([x, y], 1)
-
-        #x = F.leaky_relu(self.fc2_bn(self.fc2(x)), 0.2)
-        #x = F.leaky_relu(self.fc3_bn(self.fc3(x)), 0.2)
-        #x = F.tanh(self.fc4(x))
         
         # 2d
         x = self.fc(x)
-        x = x.view(-1, 64, self.img_shape[1]//2//2, self.img_shape[2]//2//2)
+        x = x.view(-1, 64, self.img_shape[1]//8, self.img_shape[2]//8)
+
+        x = self.deconv1(x)
         x = F.leaky_relu(self.bn1(x), 0.2)
-        x = F.leaky_relu(self.bn2(self.deconv1(x)), 0.2)
-        
+
+        x = self.deconv2(x)
+        x = F.leaky_relu(self.bn2(x), 0.2)
+
+        #x = F.leaky_relu(x, 0.2)
+
         #https://stackoverflow.com/questions/44525338/use-of-tanh-in-the-output-layer-of-generator-network
         #x = torch.tanh(self.deconv2(x))  # tanh only applies to data in range [-1, 1]
-        x = torch.sigmoid(self.deconv2(x)) # sigmoid is for data in range [0, 1]
-         
+        x = torch.sigmoid(self.deconv3(x)) # sigmoid is for data in range [0, 1]
         return x
 
 
@@ -90,39 +87,36 @@ class Discriminator(nn.Module):
         #self.fc1_1 = nn.Linear(int(np.prod(self.img_shape)), 512) # original 1024, new 512, working: 256
         # https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
         self.conv1 = nn.Conv2d(3, 16, kernel_size = 3, stride = 1, padding=1, padding_mode="zeros") # outsize: insize + 2*padding - kernel + 1
-        self.pool = nn.MaxPool2d(kernel_size = 2, stride = 2)
+        self.bn2d_1 = nn.BatchNorm2d(16)
         self.conv2 = nn.Conv2d(16, 32, kernel_size = 3, stride = 1, padding=1, padding_mode="zeros") # outsize: insize + 2*padding - kernel + 1
+        self.bn2d_2 = nn.BatchNorm2d(32)                       # 3 -> 16 -> 32 vs 3 -> 8 -> 16
         #18 * 64 * 64 input features, 512 output features (see sizing flow below)
 
-        self.fc1_1 = nn.Linear(int(32 * img_shape[1]//2//2 * img_shape[2]//2//2), 512)
-        self.fc1_2 = nn.Linear(self.n_classes, 512)
-        self.fc2 = nn.Linear(1024, 512) # original 1024+1024, new 512+512
-        self.fc2_bn = nn.BatchNorm1d(512)
-        self.fc3 = nn.Linear(512, 256)
-        self.fc3_bn = nn.BatchNorm1d(256)
-        self.fc4 = nn.Linear(256, 1)
+        self.fc1_1 = nn.Linear(int(32 * self.img_shape[1] * self.img_shape[2]), 512) # 16, 256
+        self.fc1_2 = nn.Linear(self.n_classes, 256)
+        self.fc2 = nn.Linear(512+256, 128) # 256, 64
+        #self.fc2_v2 = nn.Linear(128+self.n_classes, 32)
+        self.fc3 = nn.Linear(128, 64) # 64, 16
+        self.fc4 = nn.Linear(64, 1) # 16, 1
 
 
     # forward method
     def forward(self, input, label):
         # additional convs    
-        #x = F.relu(self.conv1(input))
+        #x = F.leaky_relu(self.bn2d_1(self.conv1(input)), 0.2)
+        #x = F.leaky_relu(self.bn2d_2(self.conv2(x)), 0.2)
         x = F.leaky_relu(self.conv1(input), 0.2)
-        x = self.pool(x)
-        #x = F.relu(self.conv2(x))
         x = F.leaky_relu(self.conv2(x), 0.2)
-        x = self.pool(x)
-
-
-        #x = F.leaky_relu(self.fc1_1(input.view(input.size(0),-1)), 0.2)
         x = F.leaky_relu(self.fc1_1(x.view(x.size(0),-1)), 0.2)
         y = F.leaky_relu(self.fc1_2(label), 0.2)
+        #y = label 
         x = torch.cat([x, y], 1)
-        #x = F.leaky_relu(self.fc2_bn(self.fc2(x)), 0.2) # with batchnorm
-        #x = F.leaky_relu(self.fc3_bn(self.fc3(x)), 0.2) # with batchnorm
-        x = F.leaky_relu(self.fc2(x), 0.2) # test w/o batchnorm
-        x = F.leaky_relu(self.fc3(x), 0.2) # test w/o batchnorm
+
+        x = F.leaky_relu(self.fc2(x), 0.2) # w/o batchnorm
+        #x = F.leaky_relu(self.fc2_v2(x), 0.2)
+        x = F.leaky_relu(self.fc3(x), 0.2) # w/o batchnorm
         validity = torch.sigmoid(self.fc4(x))
+
         return validity
 
 
