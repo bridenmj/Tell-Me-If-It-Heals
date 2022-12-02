@@ -29,6 +29,7 @@ writer = SummaryWriter()
 import dcgan
 import temporal_encoder as TE
 import temporal_discriminator as TD
+import extrapolation_network as EXT
 
 #from dataloader import WoundImageDataset
 from dataloader import WoundImagePairsDataset # new dataset with day i and j
@@ -57,7 +58,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CLIP = 0.02
 D_UPDATE_THRESHOLD = 0.25
 
-
+TRAIN_EXTRP = False
 
 
 def _extrapolate_linear(x1, x2, idx_i, idx_j, idx_k):
@@ -159,9 +160,10 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
     STD = torch.tensor([0.20345279, 0.14542403, 0.12238597])
 
     # create output folder
-    if os.path.exists(outpath):
-        shutil.rmtree(outpath)
-    os.mkdir(outpath)
+    if not TRAIN_EXTRP:
+        if os.path.exists(outpath):
+            shutil.rmtree(outpath)
+        os.mkdir(outpath)
 
     # retrieve the list of image paths
     #img_list = list_full_paths(datapath)
@@ -185,6 +187,8 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
     temporal_loss = torch.nn.BCELoss() #############################################################################
     #temporal_loss = torch.nn.BCEWithLogitsLoss()
 
+    extrap_loss = torch.nn.MSELoss()
+
 
     # Initialize Generator and discriminator
     generator = dcgan.Generator(IMG_SHAPE, opt.latent_dim, C)
@@ -205,10 +209,18 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
     tc_latent_dim = 32
     temporal_discriminator = TD.TemporalDiscriminator(IMG_SHAPE, tc_latent_dim)
 
+    # --- initialize extrapolator
+    extrapolator = EXT.ExtrapolationNetwork(80, 16)
+    extrapolator.train()
 
     # Initialize weights
     #generator.apply(weights_init_normal)
     #discriminator.apply(weights_init_normal)
+    if not TRAIN_EXTRP:
+        extrapolator = torch.load("../checkpoints/extrapolator.pth")
+        for p in extrapolator.parameters():
+            p.require_grads = False
+        extrapolator.eval()
 
     
     print("Using %s.\n"%DEVICE)
@@ -216,6 +228,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
     discriminator = discriminator.to(DEVICE)
     temporal_encoder = temporal_encoder.to(DEVICE)
     temporal_discriminator = temporal_discriminator.to(DEVICE)
+    extrapolator = extrapolator.to(DEVICE)
 
     adversarial_loss = adversarial_loss.to(DEVICE)
     embedding_loss = embedding_loss.to(DEVICE)
@@ -241,6 +254,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
     b2_D = 0.99 #0.95
     optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(b1_G, b2_G))
     optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(b1_D, b2_D))
+    optimizer_E = torch.optim.Adam(extrapolator.parameters(), lr=0.001, betas=(0.5, 0.99))
     # optimizer_G = torch.optim.RMSprop(generator.parameters(), lr=opt.lr)
     # optimizer_D = torch.optim.RMSprop(discriminator.parameters(), lr=opt.lr)
 
@@ -255,7 +269,8 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
 
     for epoch in range(opt.epochs):
         for i, data in enumerate(train_dataloader):
-            
+            batches_done = epoch * len(train_dataloader) + i
+
             # PREPARE DATA
 
             # unload data
@@ -285,10 +300,33 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             # unfreeze temporal encoder and perform extrapolation on the go
             embeds_i = temporal_encoder(transform_densenet(imgs_i))[1]      # [1] because we only need the embedding from returned (u1, embeddings), where u1 is the class prediction
             embeds_j = temporal_encoder(transform_densenet(imgs_j))[1]
-            extp_embeds_k = _extrapolate_linear(embeds_i, embeds_j, idx_i.unsqueeze(1), idx_j.unsqueeze(1), idx_k.unsqueeze(1))
-            
+
+            # ------------- EXTRAPOLATION STAGE
+            #extp_embeds_k = _extrapolate_linear(embeds_i, embeds_j, idx_i.unsqueeze(1), idx_j.unsqueeze(1), idx_k.unsqueeze(1))
+            #print(embeds_i.shape, F.one_hot(idx_i, num_classes = C).shape)
+            extrapolate_input = torch.concat((
+                F.one_hot(idx_i, num_classes = C),
+                F.one_hot(idx_j, num_classes = C),
+                F.one_hot(idx_k, num_classes = C),
+                embeds_i,
+                embeds_j,),
+                dim=1
+            )
+            #print(extrapolate_input.shape)
+            extp_embeds_k = extrapolator(extrapolate_input)
+            target_embeds_k = temporal_encoder(transform_densenet(imgs_k))[1]
+            embeds_k_loss = extrap_loss(extp_embeds_k, target_embeds_k) #################################################### when to backward()?
+
+            if TRAIN_EXTRP:
+                optimizer_E.zero_grad()
+                embeds_k_loss.backward()
+                optimizer_E.step()
+                print(epoch, i, embeds_k_loss.item())
+                writer.add_scalar("extrapolator_loss", embeds_k_loss, batches_done)
+                continue
+
             Y16 = extp_embeds_k
-            #Y16 = temporal_encoder(transform_densenet(imgs_k))[1]
+            #Y16 = target_embeds_k
 
             
             # Sample labels as generator input
@@ -449,7 +487,7 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
             # Per Iteration Wrap-up: Present Generated Images and Save Checkpoint
             # =====================================================================================================================
 
-            batches_done = epoch * len(train_dataloader) + i
+            
             if batches_done % opt.sample_interval == 0:
                 noise = Variable(torch.randn((B, opt.latent_dim)).cuda())
 
@@ -467,7 +505,11 @@ def train_cgan(datapath, annotation_file, outpath="../tmp/"):
 
         if (epoch+1) % 1 == 0:
             # print(g_temporal_target)
-            torch.save(generator, os.path.join(outpath, "cgan_gen.pth"))
+            if TRAIN_EXTRP:
+                torch.save(extrapolator, "../checkpoints/extrapolator.pth")
+                break
+            else:
+                torch.save(generator, os.path.join(outpath, "cgan_gen.pth"))
 
     # print(temporal_pred)
     # print(temporal_target)

@@ -6,6 +6,7 @@ import torchvision.transforms as transforms
 import torch.nn.functional as F
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+CHECKPOINT_PATH = "../checkpoints/healnet_pretext_encoder_50epoch_149_128_LinearRank.tar"
 
 
 class Encoder(nn.Module):
@@ -89,7 +90,7 @@ class Classifier_Encoder(nn.Module):
         # Initialize self._modules as OrderedDict
         super(Classifier_Encoder, self).__init__() 
         self.embed_model = Encoder()
-        self.embed_model.load_state_dict(torch.load("../checkpoints/healnet_pretext_encoder_50epoch_149_128.tar"))
+        self.embed_model.load_state_dict(torch.load(CHECKPOINT_PATH))
 
         for params in self.embed_model.parameters():
             params.requires_grad = False
